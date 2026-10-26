@@ -1,3 +1,4 @@
+import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'api.dart';
@@ -5,6 +6,14 @@ import 'screens.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (d) {
+    FlutterError.presentError(d);
+    Api.log('FlutterError: ${d.exceptionAsString()}\n${d.stack}');
+  };
+  PlatformDispatcher.instance.onError = (e, s) {
+    Api.log('Uncaught: $e\n$s');
+    return true;
+  };
   try {
     final s = await Api.settings();
     themeMode.value = (s['theme'] ?? 'system') as String;

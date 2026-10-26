@@ -2,3 +2,4 @@ build/
 .dart_tool/
 android/
 errors*.txt
+signing.b64

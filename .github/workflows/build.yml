@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,9 +26,29 @@ jobs:
           D=android/app/src/main/kotlin/com/oneshoot/charger_guard
           mkdir -p $D
           cp android_overrides/*.kt $D/
+          cp -r res_overrides/. android/app/src/main/res/
           cp android_overrides/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+      - name: Restore fixed signing key
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+            echo "fixed key restored"
+          else
+            echo "no fixed key secret - random key will be used"
+          fi
       - run: flutter pub get
       - run: flutter build apk --release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          cp build/app/outputs/flutter-apk/app-release.apk charger-guard.apk
+          gh release create "v$V" charger-guard.apk --repo "${{ github.repository }}" --title "حارس الشاحن $V" --notes-file RELEASE_NOTES.md --latest \
+            || gh release upload "v$V" charger-guard.apk --repo "${{ github.repository }}" --clobber
       - uses: actions/upload-artifact@v4
         with:
           name: charger-guard-apk

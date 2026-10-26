@@ -1,5 +1,6 @@
 package com.oneshoot.charger_guard
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,7 +10,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -17,6 +23,7 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -38,6 +45,8 @@ class GuardService : Service() {
         @Volatile var dist = 0f
         @Volatile var limit = 10f
         @Volatile var away = false
+        @Volatile var steps = 0
+        @Volatile var plugged = false
     }
 
     private lateinit var lm: LocationManager
@@ -47,6 +56,7 @@ class GuardService : Service() {
     private var player: MediaPlayer? = null
     private var receiverOn = false
     private var fgOn = false
+    private var gpsDist = 0f
 
     private val timeoutRun = Runnable {
         if (state == "tracking") { stopTracking(); state = "idle"; refresh() }
@@ -72,10 +82,19 @@ class GuardService : Service() {
         override fun onProviderDisabled(provider: String) {}
     }
 
+    private val stepListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            steps += 1
+            updateDist()
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        P.installCrashLogger(this)
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         if (Build.VERSION.SDK_INT >= 26) {
             val nm = getSystemService(NotificationManager::class.java)
@@ -96,11 +115,13 @@ class GuardService : Service() {
                 }
                 A_TEST -> { goForeground(); fireAlarm(false) }
                 else -> {
+                    plugged = isPlugged()
                     goForeground(); registerPower()
                     state = "idle"; refresh()
                 }
             }
         } catch (e: Exception) {
+            P.logEx(this, "service", e)
             shutdown()
         }
         return START_NOT_STICKY
@@ -132,32 +153,39 @@ class GuardService : Service() {
     }
 
     private fun statusNotif(title: String, text: String): Notification {
-        val b = nb("status").setSmallIcon(applicationInfo.icon).setContentTitle(title)
+        val b = nb("status").setSmallIcon(R.drawable.ic_stat).setContentTitle(title)
             .setContentText(text).setOngoing(true).setContentIntent(openApp())
         if (state == "tracking" || state == "alarm") b.addAction(0, "خدت الشاحن ✅", act(A_TOOK))
         return b.build()
     }
 
     private fun alarmNotif(): Notification {
-        val b = nb("alarm").setSmallIcon(applicationInfo.icon).setContentTitle("⚠️ نسيت الشاحن!")
+        val b = nb("alarm").setSmallIcon(R.drawable.ic_stat).setContentTitle("⚠️ نسيت الشاحن!")
             .setContentText("اضغط «خدت الشاحن» لإيقاف الإنذار").setOngoing(true)
             .setContentIntent(openApp()).addAction(0, "خدت الشاحن ✅", act(A_TOOK))
         if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_HIGH)
         return b.build()
     }
 
+    private fun isPlugged(): Boolean {
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        return (b?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+    }
+
+    private fun texts(): Pair<String, String> = when (state) {
+        "tracking" -> "فصلت الشاحن" to "بتابع مكانك… لو بعدت هرن عليك"
+        "alarm" -> "نسيت الشاحن!" to "اضغط «خدت الشاحن» لإيقاف الإنذار"
+        else -> "الحارس شغّال" to (if (plugged) "الشاحن موصّل — بستنى فصله" else "الشاحن مفصول — وصّله عشان أبدأ المراقبة")
+    }
+
     private fun refresh() {
-        val (t, x) = when (state) {
-            "tracking" -> "فصلت الشاحن" to "بتابع مكانك… لو بعدت هرن عليك"
-            "alarm" -> "نسيت الشاحن!" to "اضغط «خدت الشاحن» لإيقاف الإنذار"
-            else -> "الحارس شغّال" to "بستنى فصل الشاحن"
-        }
+        val (t, x) = texts()
         getSystemService(NotificationManager::class.java).notify(1, statusNotif(t, x))
     }
 
     private fun goForeground() {
         if (fgOn) return
-        val n = statusNotif("الحارس شغّال", "بستنى فصل الشاحن")
+        val n = statusNotif(texts().first, texts().second)
         if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         else startForeground(1, n)
         fgOn = true
@@ -175,14 +203,21 @@ class GuardService : Service() {
     }
 
     private fun onConnected() {
+        plugged = true
+        if (state == "idle") refresh()
         if (state == "tracking" || state == "alarm") {
             stopAlarm(); stopTracking(); state = "idle"; refresh()
         }
     }
 
     private fun onDisconnected() {
+        plugged = false
         if (state == "alarm") return
         stopTracking()
+        steps = 0
+        gpsDist = 0f
+        away = false
+        limit = P.i(this, "threshold", 10).toFloat()
         val lk = P.lastKnown(this)
         if (lk != null && System.currentTimeMillis() - lk.time < 120000L) setAnchor(lk) else anchor = null
         trackStart = System.currentTimeMillis()
@@ -206,7 +241,7 @@ class GuardService : Service() {
             away = l.distanceTo(h) > 300f
         }
         val th = P.i(this, "threshold", 10)
-        limit = if (away) maxOf(3, th / 2).toFloat() else th.toFloat()
+        limit = if (away) maxOf(1, th / 2).toFloat() else th.toFloat()
     }
 
     private fun startUpdates() {
@@ -216,24 +251,43 @@ class GuardService : Service() {
             if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
                 lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 0f, locListener)
         } catch (e: Exception) {
+            P.logEx(this, "location", e)
+        }
+        try {
+            val ok = Build.VERSION.SDK_INT < 29 ||
+                checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
+            val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            val st = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+            if (ok && st != null) sm.registerListener(stepListener, st, SensorManager.SENSOR_DELAY_NORMAL)
+        } catch (e: Exception) {
+            P.logEx(this, "steps", e)
         }
     }
 
     private fun onFix(l: Location) {
-        if (l.hasAccuracy() && l.accuracy > 60f) return
+        if (l.hasAccuracy() && l.accuracy > 50f) return
         val a = anchor
         if (a == null) { setAnchor(l); return }
         if (System.currentTimeMillis() - trackStart < 15000L && l.hasAccuracy() && a.hasAccuracy() && l.accuracy < a.accuracy) {
             setAnchor(l); return
         }
-        dist = a.distanceTo(l)
+        val noise = ((if (a.hasAccuracy()) a.accuracy else 0f) + (if (l.hasAccuracy()) l.accuracy else 0f)) / 2f
+        gpsDist = maxOf(0f, a.distanceTo(l) - noise)
+        updateDist()
+    }
+
+    private fun updateDist() {
+        dist = maxOf(gpsDist, steps * 0.7f)
         if (state == "tracking" && dist > limit) fireAlarm(true)
     }
 
     private fun stopTracking() {
         handler.removeCallbacks(timeoutRun)
         try { lm.removeUpdates(locListener) } catch (e: Exception) {}
+        try { (getSystemService(Context.SENSOR_SERVICE) as SensorManager).unregisterListener(stepListener) } catch (e: Exception) {}
         anchor = null
+        gpsDist = 0f
+        steps = 0
         dist = 0f
     }
 
@@ -261,7 +315,7 @@ class GuardService : Service() {
             val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             val pat = longArrayOf(0, 800, 400)
             if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createWaveform(pat, 0)) else v.vibrate(pat, 0)
-        } catch (e: Exception) {}
+        } catch (e: Exception) { P.logEx(this, "vibrate", e) }
         if (inSilent()) return
         try {
             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -279,7 +333,7 @@ class GuardService : Service() {
             mp.prepare()
             mp.start()
             player = mp
-        } catch (e: Exception) {}
+        } catch (e: Exception) { P.logEx(this, "sound", e) }
     }
 
     private fun stopAlarm() {

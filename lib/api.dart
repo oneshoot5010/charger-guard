@@ -42,6 +42,25 @@ class Api {
   }
 
   static Future<bool> setHome() async => (await _c.invokeMethod('home')) == true;
+  static Future<bool> batteryOk() async => (await _c.invokeMethod('batteryOk')) == true;
+  static Future<void> batteryAsk() async {
+    await _c.invokeMethod('batteryAsk');
+  }
+
+  static Future<String> updDir() async => (await _c.invokeMethod('updDir')) as String;
+  static Future<Map<String, dynamic>> appVersion() async =>
+      Map<String, dynamic>.from((await _c.invokeMethod('appVersion')) as Map);
+  static Future<bool> install(String path) async =>
+      (await _c.invokeMethod('install', {'path': path})) == true;
+  static Future<String> report() async => (await _c.invokeMethod('report')) as String;
+  static Future<void> clearLog() async {
+    await _c.invokeMethod('clearLog');
+  }
+
+  static void log(String m) {
+    _c.invokeMethod('log', {'m': m}).catchError((_) {});
+  }
+
   static Future<void> open(String url) async {
     await _c.invokeMethod('open', {'url': url});
   }

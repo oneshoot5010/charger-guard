@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'api.dart';
+import 'update.dart';
 
 class Shell extends StatefulWidget {
   const Shell({super.key});
@@ -11,11 +12,37 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int i = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    Future.delayed(const Duration(seconds: 2), _checkUpdate);
+  }
+
+  Future<void> _checkUpdate() async {
+    try {
+      final v = await Api.appVersion();
+      final u = await Updater.latest();
+      if (!mounted || u == null || u.build <= (v['code'] as num).toInt()) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 12),
+        content: Text('فيه تحديث جديد — الإصدار ${u.version}'),
+        action: SnackBarAction(label: 'حدّث', onPressed: () => showUpdateDialog(context)),
+      ));
+    } catch (_) {}
+  }
   @override
   Widget build(BuildContext context) {
     final pages = [const GuardPage(), const HistoryPage(), const SettingsPage()];
     return Scaffold(
-      appBar: AppBar(title: const Text('حارس الشاحن', style: TextStyle(fontWeight: FontWeight.bold)), centerTitle: true),
+      appBar: AppBar(
+        title: const Text('حارس الشاحن', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        actions: [
+          IconButton(tooltip: 'الشرح', icon: const Icon(Icons.help_outline), onPressed: () => showHelpDialog(context)),
+          IconButton(tooltip: 'استثناء البطارية', icon: const Icon(Icons.battery_saver), onPressed: () => showBatteryDialog(context)),
+        ],
+      ),
       body: SafeArea(child: pages[i]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: i,
@@ -39,7 +66,7 @@ class GuardPage extends StatefulWidget {
 
 class _GuardPageState extends State<GuardPage> {
   Timer? _t;
-  Map<String, dynamic> s = {'state': 'off', 'dist': 0.0, 'limit': 10.0, 'away': false, 'charging': false};
+  Map<String, dynamic> s = {'state': 'off', 'steps': 0, 'dist': 0.0, 'limit': 10.0, 'away': false, 'charging': false};
 
   @override
   void initState() {
@@ -96,8 +123,10 @@ class _GuardPageState extends State<GuardPage> {
     };
     final sub = switch (st) {
       'alarm' => 'اضغط «خدت الشاحن» لإيقاف الإنذار',
-      'tracking' => 'المسافة: ${dist.toStringAsFixed(0)} م  (الحد: ${limit.toStringAsFixed(0)} م)',
-      'idle' => 'بستنى فصل الشاحن',
+      'tracking' => 'المسافة: ${dist.toStringAsFixed(1)} م  (الحد: ${limit.toStringAsFixed(0)} م)\nخطوات: ${s['steps'] ?? 0}',
+      'idle' => s['charging'] == true
+          ? 'الشاحن موصّل — هبدأ أراقب أول ما تفصله'
+          : 'الشاحن مفصول — وصّله الأول عشان الحارس يبدأ المراقبة',
       _ => 'اضغط الزرار الكبير للتفعيل',
     };
     final icon = st == 'alarm'
@@ -179,7 +208,7 @@ class _GuardPageState extends State<GuardPage> {
               child: Padding(
                 padding: EdgeInsets.all(16),
                 child: Text(
-                  'إزاي بيشتغل؟\n١) فعّل الحارس.\n٢) لما تفصل الموبايل من الشاحن بيبدأ يتابع مكانك.\n٣) لو بعدت عن مكان الفصل أكتر من المسافة المحددة، الإنذار يرن لحد ما تدوس «خدت الشاحن» أو توصّل الشاحن تاني.\n\nمهم: شغّل الموقع (GPS) وخلّي التطبيق من غير توفير بطارية.',
+                  kHelp,
                   style: TextStyle(height: 1.6),
                 ),
               ),
@@ -296,6 +325,23 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
+  Future<void> _copyReport() async {
+    try {
+      final r = await Api.report();
+      await Clipboard.setData(ClipboardData(text: r));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اتنسخ تقرير الأخطاء — ابعته للمطوّر')));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _clearLog() async {
+    await Api.clearLog();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اتمسح سجل الأخطاء')));
+    }
+  }
+
   String _fmt(int m) => '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
 
   Future<void> _pick(String key) async {
@@ -351,9 +397,9 @@ class _SettingsPageState extends State<SettingsPage> {
               ListTile(title: const Text('المسافة اللي يرن عندها'), trailing: Text('${m['threshold']} م')),
               Slider(
                 value: (m['threshold'] as int).toDouble(),
-                min: 3,
+                min: 1,
                 max: 100,
-                divisions: 97,
+                divisions: 99,
                 label: '${m['threshold']} م',
                 onChanged: (v) => setState(() => m['threshold'] = v.round()),
                 onChangeEnd: (v) => Api.set('threshold', v.round()),
@@ -361,16 +407,16 @@ class _SettingsPageState extends State<SettingsPage> {
               ListTile(title: const Text('مدة المراقبة بعد فصل الشاحن'), trailing: Text('${m['monitor']} دقيقة')),
               Slider(
                 value: (m['monitor'] as int).toDouble(),
-                min: 5,
+                min: 1,
                 max: 120,
-                divisions: 23,
+                divisions: 119,
                 label: '${m['monitor']} د',
                 onChanged: (v) => setState(() => m['monitor'] = v.round()),
                 onChangeEnd: (v) => Api.set('monitor', v.round()),
               ),
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
-                child: Text('ملحوظة: GPS جوه المباني ممكن يغلط ٥–١٥ متر، فخلّي المسافة ١٠ متر أو أكتر للدقة.', style: TextStyle(fontSize: 12)),
+                child: Text('المسافة بتتحسب من GPS وعدّاد الخطوات مع بعض. جوه المباني الـGPS بيغلط، فالمسافات الصغيرة (١–٥ متر) بتعتمد أكتر على الخطوات.', style: TextStyle(fontSize: 12)),
               ),
             ],
           ),
@@ -412,6 +458,28 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
         ),
+        _section('الصيانة'),
+        Row(
+          children: [
+            Expanded(child: ActionTile(icon: Icons.system_update, label: 'تحديث التطبيق', onTap: () => showUpdateDialog(context))),
+            const SizedBox(width: 12),
+            Expanded(child: ActionTile(icon: Icons.bug_report, label: 'نسخ تقرير الأخطاء', onTap: _copyReport, onLongPress: _clearLog)),
+          ],
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 8),
+          child: Text('اضغط مطوّلاً على «نسخ تقرير الأخطاء» لمسح السجل.', style: TextStyle(fontSize: 12)),
+        ),
+        _section('البطارية'),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.battery_saver),
+            title: const Text('استثناء من توفير البطارية'),
+            subtitle: const Text('ضروري عشان الحارس ميتقفلش في الخلفية'),
+            trailing: const Icon(Icons.chevron_left),
+            onTap: () => showBatteryDialog(context),
+          ),
+        ),
         _section('عن التطبيق'),
         Card(
           child: ListTile(
@@ -427,87 +495,329 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
+// ---------------- الشرح والبطارية ----------------
+const kHelp = 'إزاي بيشتغل؟\n'
+    '١) فعّل الحارس واسمح بالموقع والإشعارات والنشاط البدني.\n'
+    '٢) لما تفصل الشاحن بيبدأ يحسب المسافة اللي بتتحركها (GPS + عدّاد خطوات).\n'
+    '٣) لو بعدت أكتر من المسافة المحددة الإنذار يرن لحد ما تدوس «خدت الشاحن» أو توصّل الشاحن تاني.\n'
+    '٤) 🔋 دوس أيقونة البطارية فوق واستثني التطبيق من توفير البطارية عشان الحارس ميتقفلش.\n'
+    '٥) شغّل الموقع (GPS).\n'
+    '٦) تقدر تضيف «حارس الشاحن» في لوحة الإعدادات السريعة (اسحب من فوق ← القلم ← أضف).';
+
+void showHelpDialog(BuildContext context) => showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        icon: const Icon(Icons.shield, size: 36),
+        content: const SingleChildScrollView(child: Text(kHelp, style: TextStyle(height: 1.7))),
+        actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('تمام'))],
+      ),
+    );
+
+void showBatteryDialog(BuildContext context) =>
+    showDialog(context: context, builder: (_) => const _BatteryDialog());
+
+class _BatteryDialog extends StatefulWidget {
+  const _BatteryDialog();
+  @override
+  State<_BatteryDialog> createState() => _BatteryDialogState();
+}
+
+class _BatteryDialogState extends State<_BatteryDialog> with WidgetsBindingObserver {
+  bool? ok;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _check();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _check();
+  }
+
+  Future<void> _check() async {
+    try {
+      final v = await Api.batteryOk();
+      if (mounted) setState(() => ok = v);
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final good = ok == true;
+    return AlertDialog(
+      icon: Icon(good ? Icons.verified : Icons.battery_alert, size: 40, color: good ? Colors.green : Colors.amber.shade700),
+      title: const Text('استثناء من توفير البطارية'),
+      content: Text(
+        good
+            ? 'تمام ✓ التطبيق مستثنى من توفير البطارية، والحارس هيفضل شغال في الخلفية.'
+            : 'الموبايل ممكن يقفل الحارس في الخلفية عشان يوفّر بطارية، وساعتها مش هيرن لو نسيت الشاحن.\n\nدوس «استثناء التطبيق» ووافق.\n\nعلى موبايلات أوبو وشاومي وسامسونج فعّل كمان «التشغيل التلقائي» أو «الخلفية بلا قيود» من إعدادات التطبيق.',
+        style: const TextStyle(height: 1.6),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('إغلاق')),
+        if (!good) FilledButton(onPressed: () => Api.batteryAsk(), child: const Text('استثناء التطبيق')),
+      ],
+    );
+  }
+}
+
 // ---------------- عن المطوّر ----------------
 class DeveloperPage extends StatelessWidget {
   const DeveloperPage({super.key});
 
   static const phone = '+201044947639';
+  static const gold1 = Color(0xFFFFD27A);
+  static const gold2 = Color(0xFFE08A00);
 
   @override
   Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final cs = Theme.of(context).colorScheme;
+    final top = MediaQuery.of(context).padding.top + kToolbarHeight;
     return Scaffold(
-      appBar: AppBar(title: const Text('عن المطوّر'), centerTitle: true),
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        foregroundColor: dark ? Colors.white : const Color(0xFF2A1E08),
+        title: const Text('عن المطوّر'),
+        centerTitle: true,
+      ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.zero,
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+            padding: EdgeInsets.fromLTRB(20, top + 8, 20, 36),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(40)),
               gradient: LinearGradient(
                 begin: Alignment.topRight,
                 end: Alignment.bottomLeft,
-                colors: [cs.primaryContainer, cs.tertiaryContainer],
+                colors: dark
+                    ? const [Color(0xFF3A2A0C), Color(0xFF14110B)]
+                    : const [Color(0xFFFFD27A), Color(0xFFE08A00)],
               ),
             ),
-            child: Column(
+            child: Stack(
+              alignment: Alignment.topCenter,
               children: [
-                Container(
-                  width: 104,
-                  height: 104,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: cs.primary,
-                    border: Border.all(color: Colors.white, width: 4),
-                    boxShadow: [BoxShadow(color: cs.primary.withAlpha(110), blurRadius: 24)],
-                  ),
-                  alignment: Alignment.center,
-                  child: Text('MH', style: TextStyle(fontSize: 38, fontWeight: FontWeight.w900, color: cs.onPrimary)),
-                ),
-                const SizedBox(height: 16),
-                const Directionality(
-                  textDirection: TextDirection.ltr,
-                  child: Text('Mohamed Hassan Taha', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(height: 6),
-                const Text('مطوّر تطبيقات أندرويد', style: TextStyle(fontSize: 16)),
-                const SizedBox(height: 14),
-                const Wrap(
-                  spacing: 8,
-                  children: [Chip(label: Text('Android')), Chip(label: Text('Flutter')), Chip(label: Text('Kotlin'))],
+                Positioned(top: -10, left: -50, child: _orb(150, 40)),
+                Positioned(top: 120, right: -60, child: _orb(130, 28)),
+                Column(
+                  children: [
+                    Container(
+                      width: 128,
+                      height: 128,
+                      padding: const EdgeInsets.all(4),
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: SweepGradient(colors: [gold1, gold2, Color(0xFFFFF1CC), gold2, gold1]),
+                        boxShadow: [BoxShadow(color: Color(0x66E08A00), blurRadius: 30, spreadRadius: 2)],
+                      ),
+                      child: Container(
+                        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF1A1409)),
+                        alignment: Alignment.center,
+                        child: ShaderMask(
+                          shaderCallback: (r) => const LinearGradient(colors: [gold1, gold2]).createShader(r),
+                          child: const Text('MH', style: TextStyle(fontSize: 46, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 2)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: Text('Mohamed Hassan Taha',
+                          style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800, color: dark ? Colors.white : const Color(0xFF2A1E08))),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withAlpha(dark ? 90 : 45),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(color: gold1.withAlpha(140)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.verified, size: 18, color: gold1),
+                          SizedBox(width: 6),
+                          Text('مطوّر تطبيقات أندرويد', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 16),
-          Card(
-            child: ListTile(
-              leading: const CircleAvatar(backgroundColor: Color(0xFF25D366), child: Icon(Icons.chat, color: Colors.white)),
-              title: const Text('كلمني على واتساب'),
-              subtitle: const Directionality(textDirection: TextDirection.ltr, child: Text(phone)),
-              trailing: IconButton(
-                icon: const Icon(Icons.copy),
-                onPressed: () {
-                  Clipboard.setData(const ClipboardData(text: phone));
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اتنسخ الرقم')));
-                },
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 700),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, child) => Opacity(opacity: v, child: Transform.translate(offset: Offset(0, 30 * (1 - v)), child: child)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _title(context, 'نبذة', Icons.person_outline),
+                  const Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text(
+                        'بصمّم وأبني تطبيقات أندرويد بسيطة وسريعة وبتحل مشاكل حقيقية في الحياة اليومية، من الفكرة لحد ما التطبيق يوصل لإيد المستخدم.',
+                        style: TextStyle(height: 1.7),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _title(context, 'المهارات', Icons.bolt),
+                  const Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _Skill(Icons.android, 'Android'),
+                      _Skill(Icons.flutter_dash, 'Flutter'),
+                      _Skill(Icons.code, 'Kotlin'),
+                      _Skill(Icons.terminal, 'Termux'),
+                      _Skill(Icons.cloud_sync, 'GitHub Actions'),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  _title(context, 'تواصل معايا', Icons.forum_outlined),
+                  _Cta(
+                    colors: const [Color(0xFF25D366), Color(0xFF128C7E)],
+                    icon: Icons.chat,
+                    title: 'كلمني على واتساب',
+                    sub: phone,
+                    onTap: () => Api.open('https://wa.me/201044947639'),
+                    onCopy: () {
+                      Clipboard.setData(const ClipboardData(text: phone));
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اتنسخ الرقم')));
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  _Cta(
+                    colors: dark ? const [Color(0xFF3A3A3A), Color(0xFF111111)] : const [Color(0xFF3B3B3B), Color(0xFF111111)],
+                    icon: Icons.code,
+                    title: 'افتح GitHub',
+                    sub: 'github.com/oneshoot5010',
+                    onTap: () => Api.open('https://github.com/oneshoot5010'),
+                  ),
+                  const SizedBox(height: 28),
+                  Center(
+                    child: Text('حارس الشاحن • الإصدار 1.2.0',
+                        style: TextStyle(fontSize: 12, color: cs.onSurface.withAlpha(150))),
+                  ),
+                  const SizedBox(height: 8),
+                ],
               ),
-              onTap: () => Api.open('https://wa.me/201044947639'),
             ),
           ),
-          Card(
-            child: ListTile(
-              leading: CircleAvatar(backgroundColor: cs.inverseSurface, child: Icon(Icons.code, color: cs.onInverseSurface)),
-              title: const Text('افتح GitHub'),
-              subtitle: const Directionality(textDirection: TextDirection.ltr, child: Text('github.com/oneshoot5010')),
-              trailing: const Icon(Icons.open_in_new),
-              onTap: () => Api.open('https://github.com/oneshoot5010'),
-            ),
-          ),
-          const SizedBox(height: 24),
-          const Center(child: Text('حارس الشاحن • الإصدار 1.0.0', style: TextStyle(fontSize: 12))),
         ],
+      ),
+    );
+  }
+
+  static Widget _orb(double size, int alpha) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withAlpha(alpha)),
+      );
+
+  static Widget _title(BuildContext context, String t, IconData i) => Padding(
+        padding: const EdgeInsets.fromLTRB(4, 8, 4, 10),
+        child: Row(
+          children: [
+            Icon(i, size: 20, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 8),
+            Text(t, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+          ],
+        ),
+      );
+}
+
+class _Skill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _Skill(this.icon, this.label);
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withAlpha(120),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: cs.primary.withAlpha(110)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 18, color: cs.primary),
+        const SizedBox(width: 6),
+        Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+}
+
+class _Cta extends StatelessWidget {
+  final List<Color> colors;
+  final IconData icon;
+  final String title;
+  final String sub;
+  final VoidCallback onTap;
+  final VoidCallback? onCopy;
+  const _Cta({required this.colors, required this.icon, required this.title, required this.sub, required this.onTap, this.onCopy});
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      borderRadius: BorderRadius.circular(22),
+      clipBehavior: Clip.antiAlias,
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(22),
+          gradient: LinearGradient(begin: Alignment.topRight, end: Alignment.bottomLeft, colors: colors),
+          boxShadow: [BoxShadow(color: colors.first.withAlpha(70), blurRadius: 16, offset: const Offset(0, 6))],
+        ),
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            child: Row(
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withAlpha(45)),
+                  child: Icon(icon, color: Colors.white),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      Directionality(textDirection: TextDirection.ltr, child: Text(sub, style: TextStyle(color: Colors.white.withAlpha(210)))),
+                    ],
+                  ),
+                ),
+                if (onCopy != null) IconButton(onPressed: onCopy, icon: const Icon(Icons.copy, color: Colors.white)),
+                if (onCopy == null) const Icon(Icons.open_in_new, color: Colors.white),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
